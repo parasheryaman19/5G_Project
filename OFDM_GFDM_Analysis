@@ -1,0 +1,199 @@
+clear all
+close all
+clc
+%close
+%% Variables
+M = 4; % 16-QAM constellation
+Number_of_bits = 2^22;
+bits_per_symbol = log2(M);% number of bits per each symbol
+Number_of_symbols = Number_of_bits/bits_per_symbol; % number of symbols
+x = randi([0 1],Number_of_bits,1); % generating random bits
+x = reshape(x,[],bits_per_symbol); % reshaping the matrix
+transmitted_symbols=reshape(bi2de(x),1,[]);%converting binary to decimal
+
+%% Case for Selecting either of the two techniques
+for k=1:2
+    if k==1
+        modulation_format = "OFDM";
+    else
+        clearvars -except Number_of_symbols Number_of_bits transmitted_symbols M k x bits_per_symbol
+        modulation_format = "GFDM";
+    end
+  %% Configuration of OFDM 
+    if strcmp(modulation_format, "OFDM")
+
+        number_of_ifft_points = 2^6;
+        number_of_fft_points = number_of_ifft_points;
+        number_of_subsymbols = 1; %in OFDM we have one subsymbol per subcarrier
+        block_size = number_of_ifft_points * number_of_subsymbols; % the number of symbols contained in one ofdm channel
+        number_of_subchannels = Number_of_symbols/(block_size);
+        cp_length = ceil(0.1*block_size); % length of the cyclic prefix
+ %% Configuration of GFDM 
+    elseif strcmp(modulation_format, "GFDM")
+
+        number_of_ifft_points = 2^6;
+        number_of_fft_points = number_of_ifft_points;
+        number_of_subsymbols = 8; % subsymbols in one subcarrier in GFDM
+        block_size = number_of_ifft_points * number_of_subsymbols; % number of symbols per gfdm channel
+        number_of_subchannels = Number_of_symbols/(block_size);
+        cp_length = block_size; % length of the cyclic prefix GFDM
+
+    end
+%% Modulation Block
+input=reshape(qammod(transmitted_symbols,M),1,[]);
+
+    %scatterplot(input); %Plot Constallation
+    %title('modulated data');
+
+%% Cyclic prefix Block
+    data_matrix = reshape(input, block_size, number_of_subchannels);
+    
+    for i=1:number_of_subchannels
+        ifft_data_matrix(:,i) = ifft((data_matrix(:,i)),number_of_ifft_points * number_of_subsymbols);%+64);%64 %column i and row all - :
+        % Compute and append Cyclic Prefix
+%ifft data first column 
+        if strcmp(modulation_format, "OFDM")
+            cp_start = block_size-cp_length;
+            cp_end = block_size; 
+
+            for j=1:cp_length
+                actual_cp(j,i) = ifft_data_matrix(j+cp_start,i);
+            end
+            % Append the CP to the existing block to create the actual OFDM block
+            ifft_data(:,i) = [actual_cp(:,i);ifft_data_matrix(:,i)]; %generate new matric just add them
+        end
+    end
+
+    if strcmp(modulation_format, "GFDM")
+        ifft_data = ifft_data_matrix;
+        % Compute and append Cyclic Prefix 64
+        for j=1:(block_size) %64
+            actual_cp(j,1) = ifft_data_matrix(j,1);
+        end
+        % Append the CP to the existing block to create the actual OFDM block
+        ifft_data = [actual_cp, ifft_data_matrix]; %generate new matric just add them
+    end
+
+
+    %% Parallel to Serial Conversion block
+    % Convertion from parallel to serial for transmission
+    [rows_ifft_data, cols_ifft_data]=size(ifft_data); %take row and column size
+    len_data = rows_ifft_data*cols_ifft_data; %row*column show total number, length
+
+    % Actual OFDM signal to be transmitted
+    signal = reshape(ifft_data, 1, len_data); %make it flat row=1
+    figure(k+10) % to plot OFDM signal
+    plot(real(signal(1:(length(signal)/number_of_subsymbols)))); xlabel('Time'); ylabel('Amplitude');
+    %title(modulation_format,' Signal');
+    grid on;
+    
+    [psd,f] = periodogram(ifft_data(:,1), rectwin(length(ifft_data(:,1))),length(ifft_data(:,1))*2, 1, 'centered');
+    hFig1 = figure('Position', figposition([46 15 30 30]));
+    plot(f,(10*log10(fftshift(psd))))
+    axis([-0.5 0.5 -100 0]);
+    xlabel('Normalized frequency');
+    ylabel('PSD (dBm/Hz)')
+    if strcmp(modulation_format, "OFDM")
+        title('OFDM');
+    elseif strcmp(modulation_format, "GFDM")
+        title('GFDM');
+    end
+
+  
+    %% Channel Characteristics
+    snr_dB = [0:20]; % here we use a loop to vary snr
+
+    for ii = 1:length(snr_dB)
+        s = 1/sqrt(mean(abs(signal).^2)); % 16-QAM normalization
+        n = 1/sqrt(2)*(randn(1,len_data) + 1i*randn(1,len_data)); % normalized guassian noise
+        % Pass the signal through the channel
+        recvd_signal = s*signal+10^(-snr_dB(ii)/20)*n; % linear AWGN
+        
+      %% Receiver side
+        % Convert Data back to "parallel" form to perform FFT
+        recvd_signal_matrix = reshape(recvd_signal,rows_ifft_data, cols_ifft_data);
+
+        % Remove CP
+        if strcmp(modulation_format, "OFDM")
+            recvd_signal_matrix(1:cp_length,:)=[];
+            cols_fft_data=cols_ifft_data;
+        elseif strcmp(modulation_format, "GFDM")
+            recvd_signal_matrix(:,1)=[];
+            cols_fft_data = cols_ifft_data-1;
+        end
+        % Perform FFT
+        for i=1:cols_fft_data
+            fft_data_matrix(:,i) = fft(recvd_signal_matrix(:,i),number_of_fft_points*number_of_subsymbols);
+        end
+        % Convert parallel to serial
+        out = reshape(fft_data_matrix, 1,(block_size*number_of_subchannels));
+        out=out./s;
+        %plot constallation of reveived signal SNR 10-20
+        if strcmp(modulation_format, "OFDM") && ii >= 17
+            scatterplot(out);
+        end
+        
+        symbols_received = reshape(qamdemod(out,M),1,[]); %qam demodulation and reshaping
+     
+        symbol_errors(ii) = length(find(transmitted_symbols-symbols_received));%arrays of differences between input and output, number of errors
+        z = reshape(de2bi(symbols_received),[],bits_per_symbol);% calculate errors finds non zero elements which are errs
+        bit_errors(ii) = length(find(z-x));
+    end
+    %% Section for Calculating Symbol Error Rate
+    SER = symbol_errors/Number_of_symbols;
+    formula_SER = 3/2*erfc(sqrt(0.1*(10.^(snr_dB/10))));
+    %close all
+    figure(10)
+    if strcmp(modulation_format, "OFDM") %compare function
+        plot(snr_dB,log10(SER),':o m');
+        hold on;
+        plot(snr_dB,log10(formula_SER),'-* g');
+        %legend('OFDM numerics','OFDM analytics','GFDM numerics','GFDM analytics');
+    elseif strcmp(modulation_format, "GFDM")
+        plot(snr_dB,log10(SER),'--o c');
+        %hold on;
+        plot(snr_dB,log10(formula_SER),':d k');
+        legend('OFDM analytical','OFDM numerical','GFDM analytical','GFDM numerical');
+    end
+    title('Symbol Error Rate Plot')
+    xlabel('SNR, dB')
+    ylabel('Lg(SER)')
+    
+    
+%% Section for Calculating Bit Error Rate & Q-Factor
+    BER = bit_errors/Number_of_bits;
+    
+figure(20)
+    if strcmp(modulation_format, "OFDM")
+        plot(snr_dB,log10(BER),':o m');
+        xlabel('SNR, dB')
+        ylabel('Lg(BER)')
+        hold on;
+        figure(25)
+        Q_OFDM = sqrt(2)*erfcinv(2*BER);  %Q-factor
+        plot(snr_dB,Q_OFDM,':o m');
+        xlabel('SNR, dB')
+        ylabel('Q factor')
+        hold on;
+        %legend('OFDM numerical','OFDM analytical','GFDM numerical','GFDM analytical');
+    elseif strcmp(modulation_format, "GFDM")
+        plot(snr_dB,log10(BER),'--o g');
+        title('Bit Error Rate Plot')
+        xlabel('SNR, dB')
+        ylabel('Lg(BER)')
+        %hold on;
+        legend('OFDM analytical','GFDM analytical');
+        figure(25)
+        Q_GFDM = sqrt(2)*erfcinv(2*BER);  %Q-factor
+        plot(snr_dB,Q_GFDM,'--o g');
+        title('Q-Factor Plot')
+        xlabel('SNR, dB')
+        ylabel('Q GFDM')
+        %hold on;
+        legend('OFDM Q factor','GFDM Q factor');
+    end
+    
+    eyediagram(out(1:1000),2);
+      %Q-factor
+
+end
